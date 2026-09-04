@@ -12,13 +12,20 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { detectInputType, extractZip, findModelFile } from "./archive.js";
+import { readCatalogConfig, registerCatalogIngest } from "./catalog.js";
 import { runCommand } from "./command.js";
 import { downloadToFile } from "./download.js";
 import { resolveBlender } from "./executables.js";
 import { defaultR2Key, inferSlug } from "./naming.js";
 import { uploadPreview } from "./r2.js";
+import { getSketchfabDownload } from "./sketchfab.js";
 import type { CliOptions, PipelineResult } from "./types.js";
-import { assertWebpMatches, encodeWebp, inspectWebp } from "./webp.js";
+import {
+  assertWebpMatches,
+  encodeWebp,
+  inspectWebp,
+  resizeFrames,
+} from "./webp.js";
 
 export type Logger = (message: string) => void;
 
@@ -42,6 +49,7 @@ export async function runPipeline(
   options: CliOptions,
   log: Logger,
 ): Promise<PipelineResult> {
+  const catalogConfig = options.upload ? readCatalogConfig() : null;
   const slug = inferSlug(options);
   const workParent = resolve(".work");
   await mkdir(workParent, { recursive: true });
@@ -52,7 +60,20 @@ export async function runPipeline(
     const downloadedPath = resolve(workDirectory, "download");
     let sourceLabel: string;
 
-    if (options.url) {
+    if (options.sketchfabUid) {
+      log("Requesting a temporary Sketchfab download");
+      const sketchfab = await getSketchfabDownload(
+        options.sketchfabUid,
+        options.maxDownloadBytes,
+      );
+      log("Downloading Sketchfab model archive");
+      await downloadToFile(
+        sketchfab.archiveUrl,
+        downloadedPath,
+        options.maxDownloadBytes,
+      );
+      sourceLabel = sketchfab.sourceLabel;
+    } else if (options.url) {
       log("Downloading source model");
       const result = await downloadToFile(
         options.url,
@@ -75,7 +96,7 @@ export async function runPipeline(
       await extractZip(downloadedPath, extractedDirectory);
       modelPath = await findModelFile(extractedDirectory);
     } else {
-      if (inputType === "gltf" && options.url) {
+      if (inputType === "gltf" && (options.url || options.sketchfabUid)) {
         throw new Error(
           "Direct remote .gltf files are not supported because their dependent files are not bundled. Use a ZIP archive or GLB URL.",
         );
@@ -102,10 +123,19 @@ export async function runPipeline(
       "--frames",
       String(options.frames),
       "--size",
-      String(options.size),
+      String(options.renderSize),
       "--padding",
       String(options.padding),
     ]);
+
+    if (options.renderSize !== options.size) {
+      log(`Downscaling frames to ${options.size}x${options.size}`);
+      await resizeFrames({
+        frameDirectory,
+        frames: options.frames,
+        size: options.size,
+      });
+    }
 
     const temporaryWebp = resolve(workDirectory, "preview.webp");
     log("Encoding animated WebP");
@@ -130,6 +160,10 @@ export async function runPipeline(
     const sha256 = await sha256File(localPath);
     let r2Key: string | null = null;
     let publicUrl: string | null = null;
+    let catalogArtifactId: string | null = null;
+    let catalogAssetId: string | null = null;
+    let catalogCreated: boolean | null = null;
+    let catalogRegistered = false;
 
     if (options.upload) {
       log("Uploading preview to Cloudflare R2");
@@ -141,11 +175,53 @@ export async function runPipeline(
       });
       r2Key = uploaded.key;
       publicUrl = uploaded.publicUrl;
+
+      if (catalogConfig) {
+        log("Registering artifact and preview in the catalog");
+        const registration = await registerCatalogIngest(catalogConfig, {
+          artifact: { slug, ...options.artifact },
+          asset: {
+            bytes: fileStat.size,
+            durationMs: options.frames * options.frameDurationMs,
+            frameCount: inspection.frames,
+            height: inspection.canvasHeight,
+            kind: "preview_webp",
+            mimeType: "image/webp",
+            ...(publicUrl ? { publicUrl } : {}),
+            r2Bucket: uploaded.bucket,
+            r2Key: uploaded.key,
+            sha256,
+            width: inspection.canvasWidth,
+          },
+          publish: options.publish,
+          source: {
+            label: sourceLabel,
+            ...(options.artifact.license
+              ? { license: options.artifact.license }
+              : {}),
+            role: "model",
+            ...(options.artifact.modelUrl
+              ? { url: options.artifact.modelUrl }
+              : sourceLabel.startsWith("http://") ||
+                  sourceLabel.startsWith("https://")
+                ? { url: sourceLabel }
+                : {}),
+          },
+        });
+        catalogArtifactId = registration.artifactId;
+        catalogAssetId = registration.assetId;
+        catalogCreated = registration.created;
+        catalogRegistered = true;
+      }
     }
 
     succeeded = true;
     return {
       bytes: fileStat.size,
+      catalogArtifactId,
+      catalogAssetId,
+      catalogCreated,
+      catalogRegistered,
       durationMs: options.frames * options.frameDurationMs,
       frames: inspection.frames,
       height: inspection.canvasHeight,

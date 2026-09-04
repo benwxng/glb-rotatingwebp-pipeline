@@ -1,9 +1,43 @@
-import { readdir } from "node:fs/promises";
+import { readdir, rename } from "node:fs/promises";
 import { resolve } from "node:path";
+
+import sharp from "sharp";
 
 import { runCommand } from "./command.js";
 import { resolveExecutable } from "./executables.js";
 import type { WebpInspection } from "./types.js";
+
+async function renderedFramePaths(frameDirectory: string): Promise<string[]> {
+  return (await readdir(frameDirectory))
+    .filter((name) => /^frame_\d{4}\.png$/i.test(name))
+    .sort()
+    .map((name) => resolve(frameDirectory, name));
+}
+
+export async function resizeFrames(options: {
+  frameDirectory: string;
+  frames: number;
+  size: number;
+}): Promise<void> {
+  const framePaths = await renderedFramePaths(options.frameDirectory);
+  if (framePaths.length !== options.frames) {
+    throw new Error(
+      `Expected ${options.frames} rendered frames, found ${framePaths.length}.`,
+    );
+  }
+
+  for (const framePath of framePaths) {
+    const resizedPath = `${framePath}.resized.png`;
+    await sharp(framePath)
+      .resize(options.size, options.size, {
+        fit: "fill",
+        kernel: sharp.kernel.lanczos3,
+      })
+      .png()
+      .toFile(resizedPath);
+    await rename(resizedPath, framePath);
+  }
+}
 
 export async function encodeWebp(options: {
   frameDirectory: string;
@@ -16,10 +50,7 @@ export async function encodeWebp(options: {
     "IMG2WEBP_BIN",
     process.platform === "win32" ? "img2webp.exe" : "img2webp",
   );
-  const framePaths = (await readdir(options.frameDirectory))
-    .filter((name) => /^frame_\d{4}\.png$/i.test(name))
-    .sort()
-    .map((name) => resolve(options.frameDirectory, name));
+  const framePaths = await renderedFramePaths(options.frameDirectory);
 
   if (framePaths.length !== options.frames) {
     throw new Error(

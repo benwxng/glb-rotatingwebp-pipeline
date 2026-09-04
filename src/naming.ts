@@ -15,7 +15,12 @@ export function sanitizeSlug(value: string): string {
   return slug;
 }
 
-export function inferSlug(input: { file?: string; slug?: string; url?: string }): string {
+export function inferSlug(input: {
+  file?: string;
+  sketchfabUid?: string;
+  slug?: string;
+  url?: string;
+}): string {
   if (input.slug) return sanitizeSlug(input.slug);
 
   if (input.file) {
@@ -29,6 +34,8 @@ export function inferSlug(input: { file?: string; slug?: string; url?: string })
     const extension = extname(filename);
     return sanitizeSlug(extension ? filename.slice(0, -extension.length) : filename);
   }
+
+  if (input.sketchfabUid) return sanitizeSlug(input.sketchfabUid);
 
   throw new Error("No input was provided.");
 }

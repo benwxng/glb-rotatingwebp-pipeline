@@ -40,6 +40,12 @@ async function main(): Promise<void> {
   process.stdout.write(`SHA-256: ${result.sha256}\n`);
   if (result.r2Key) process.stdout.write(`R2 key: ${result.r2Key}\n`);
   if (result.publicUrl) process.stdout.write(`Public URL: ${result.publicUrl}\n`);
+  process.stdout.write(
+    `Catalog: ${result.catalogRegistered ? "registered" : "not registered"}\n`,
+  );
+  if (result.catalogArtifactId) {
+    process.stdout.write(`Catalog artifact ID: ${result.catalogArtifactId}\n`);
+  }
 }
 
 main().catch((error: unknown) => {
